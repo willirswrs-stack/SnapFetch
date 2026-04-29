@@ -23,8 +23,20 @@ async function getYtDlpInfo(url: string): Promise<any> {
   const cookiesArg = fs.existsSync(cookiesPath) ? `--cookies "${cookiesPath}"` : '';
   
   return new Promise((resolve, reject) => {
-    // Increase maxBuffer to 10MB to handle large JSON outputs
-    exec(`yt-dlp -j --no-warnings ${cookiesArg} --user-agent "${USER_AGENT}" --extractor-args "youtube:player_client=android,web" --force-ipv4 "${url}"`, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
+    // Advanced arguments to bypass bot detection
+    const args = [
+      '-j',
+      '--no-warnings',
+      '--no-check-certificate',
+      '--prefer-free-formats',
+      '--force-ipv4',
+      '--extractor-args "youtube:player_client=android,web"',
+      cookiesArg,
+      `--user-agent "${USER_AGENT}"`,
+      `"${url}"`
+    ].filter(Boolean).join(' ');
+
+    exec(`yt-dlp ${args}`, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
       if (error) {
         console.error(`[yt-dlp Error]: ${error.message}`);
         if (stderr) console.error(`[yt-dlp Stderr]: ${stderr}`);
@@ -40,18 +52,30 @@ async function getYtDlpInfo(url: string): Promise<any> {
   });
 }
 
-// Set ffmpeg path from installer
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-console.log(`🎥 FFmpeg Path: ${ffmpegInstaller.path}`);
+// Try to find system FFmpeg first, then fallback to installer
+let ffmpegPath = ffmpegInstaller.path;
+try {
+  const systemPath = execSync('which ffmpeg').toString().trim();
+  if (systemPath) ffmpegPath = systemPath;
+} catch (e) {}
+
+ffmpeg.setFfmpegPath(ffmpegPath);
+console.log(`🎥 FFmpeg Path: ${ffmpegPath}`);
 
 // Check if FFmpeg is installed/working
 let isFfmpegAvailable = false;
-exec(`"${ffmpegInstaller.path}" -version`, (error) => {
+exec(`"${ffmpegPath}" -version`, (error) => {
   if (error) {
-    console.warn("⚠️ AVISO: FFmpeg portátil não detectado ou com erro. O recurso de remover marca d'água pode não funcionar.");
+    console.warn("⚠️ AVISO: FFmpeg não detectado no sistema. Tentando usar o portátil...");
+    try {
+      ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+      isFfmpegAvailable = true;
+    } catch (e) {
+      console.error("❌ ERRO: FFmpeg não disponível.");
+    }
   } else {
     isFfmpegAvailable = true;
-    console.log("✅ FFmpeg portátil detectado e pronto para uso.");
+    console.log("✅ FFmpeg detectado e pronto para uso.");
   }
 });
 
@@ -506,6 +530,11 @@ async function startServer() {
           {
             filter: 'delogo',
             options: { x, y, w, h }
+          },
+          // Ensure dimensions are divisible by 2 for H.264 compatibility
+          {
+            filter: 'scale',
+            options: 'trunc(iw/2)*2:trunc(ih/2)*2'
           }
         ]);
 
