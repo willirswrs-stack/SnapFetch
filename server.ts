@@ -19,21 +19,12 @@ const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 
 // Helper for yt-dlp
 async function getYtDlpInfo(url: string): Promise<any> {
+  const cookiesPath = path.join(process.cwd(), 'cookies.txt');
+  const cookiesArg = fs.existsSync(cookiesPath) ? `--cookies "${cookiesPath}"` : '';
+  
   return new Promise((resolve, reject) => {
     // Increase maxBuffer to 10MB to handle large JSON outputs
-    // Support for cookies.txt to bypass bot detection if the user provides it
-    let cookiesFlag = "";
-    const cookiesPath = path.join(process.cwd(), "cookies.txt");
-    if (fs.existsSync(cookiesPath)) {
-      cookiesFlag = `--cookies "${cookiesPath}"`;
-    }
-
-    const ytDlpCommand = `yt-dlp -j --no-warnings ${cookiesFlag} ` +
-      `--extractor-args "youtube:player_client=android,web" ` +
-      `--user-agent "${USER_AGENT}" ` +
-      `"${url}"`;
-
-    exec(ytDlpCommand, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
+    exec(`yt-dlp -j --no-warnings ${cookiesArg} --user-agent "${USER_AGENT}" --extractor-args "youtube:player_client=android,web" --force-ipv4 "${url}"`, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
       if (error) {
         console.error(`[yt-dlp Error]: ${error.message}`);
         if (stderr) console.error(`[yt-dlp Stderr]: ${stderr}`);
