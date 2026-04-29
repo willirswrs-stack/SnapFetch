@@ -93,7 +93,14 @@ async function startServer() {
       // YouTube & Shorts
       if (url.includes("youtube.com") || url.includes("youtu.be")) {
         const isShorts = url.includes("/shorts/");
-        const info = await ytdl.getInfo(url);
+        const info = await ytdl.getInfo(url, {
+          requestOptions: {
+            headers: {
+              'User-Agent': USER_AGENT,
+              'Cookie': '', // Could add cookies here if needed
+            }
+          }
+        });
         
         // Get all formats but prioritize those with both video and audio
         const videoFormats = info.formats
@@ -261,9 +268,12 @@ async function startServer() {
       if (url.includes("instagram.com")) {
         const response = await axios.get(url, {
           headers: {
-            'User-Agent': USER_AGENT,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
           },
           timeout: 10000
         });
@@ -357,14 +367,17 @@ async function startServer() {
         'googlevideo.com', // YouTube
         'tiktok.com', 
         'tiktokv.com', 
+        'tiktokcdn.com',
+        'tiktokcdn-us.com',
         'fbcdn.net', // Facebook/Instagram
         'instagram.com',
         'twimg.com', 
         'tikwm.com',
-        'snapchat.com'
+        'snapchat.com',
+        'v.redd.it'
       ];
       
-      const isAllowed = allowedDomains.some(domain => parsedUrl.hostname.endsWith(domain));
+      const isAllowed = allowedDomains.some(domain => parsedUrl.hostname.includes(domain));
       if (!isAllowed) {
         console.warn(`Tentativa de acesso a domínio não autorizado: ${parsedUrl.hostname}`);
         return res.status(403).send("Domínio não autorizado para proxy.");
