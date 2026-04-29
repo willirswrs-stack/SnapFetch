@@ -21,7 +21,19 @@ const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 async function getYtDlpInfo(url: string): Promise<any> {
   return new Promise((resolve, reject) => {
     // Increase maxBuffer to 10MB to handle large JSON outputs
-    exec(`yt-dlp -j --no-warnings --user-agent "${USER_AGENT}" "${url}"`, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
+    // Support for cookies.txt to bypass bot detection if the user provides it
+    let cookiesFlag = "";
+    const cookiesPath = path.join(process.cwd(), "cookies.txt");
+    if (fs.existsSync(cookiesPath)) {
+      cookiesFlag = `--cookies "${cookiesPath}"`;
+    }
+
+    const ytDlpCommand = `yt-dlp -j --no-warnings ${cookiesFlag} ` +
+      `--extractor-args "youtube:player_client=android,web" ` +
+      `--user-agent "${USER_AGENT}" ` +
+      `"${url}"`;
+
+    exec(ytDlpCommand, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
       if (error) {
         console.error(`[yt-dlp Error]: ${error.message}`);
         if (stderr) console.error(`[yt-dlp Stderr]: ${stderr}`);
@@ -221,85 +233,50 @@ async function startServer() {
       }
 
       // Facebook (Videos, Reels, Ads)
-      if (url.includes("facebook.com") || url.includes("fb.watch") || url.includes("fb.com") || url.includes("facebook.com/ads/library")) {
-        // Normalize mobile and ads links
-        let targetUrl = url.replace("m.facebook.com", "www.facebook.com");
-        if (targetUrl.includes("facebook.com/ads/library")) {
-          // Ads library often needs standard www prefix
-          targetUrl = targetUrl.replace("facebook.com/ads/library", "www.facebook.com/ads/library");
-        }
-        
-        const response = await axios.get(targetUrl, {
-          headers: {
-            'User-Agent': USER_AGENT,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Cookie': 'noscript=1'
-          },
-          timeout: 10000 // 10s timeout
-        });
+      if (url.includes("facebook.com") || url.includes("fb.watch") || url.includes("fb.com")) {
+        try {
+          const info: any = await getYtDlpInfo(url);
+          
+          const formats = (info.formats || [])
+            .filter((f: any) => f.vcodec !== 'none')
+            .map((f: any) => ({
+              qualityLabel: f.format_note || f.resolution || `${f.height}p`,
+              url: f.url,
+              container: f.ext || 'mp4',
+              type: 'video' as const,
+              hasAudio: f.acodec !== 'none'
+            }))
+            .sort((a: any, b: any) => (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0));
 
-        const html = response.data;
-        const $ = cheerio.load(html);
-        
-        // Try multiple meta tags first
-        const ogVideo = $('meta[property="og:video"]').attr('content') || 
-                        $('meta[property="og:video:secure_url"]').attr('content') ||
-                        $('meta[name="twitter:player:stream"]').attr('content');
-        
-        // Comprehensive regex for Facebook video formats (SD/HD/Ads)
-        const sdMatch = html.match(/"browser_native_sd_url":"([^"]+)"/) || 
-                        html.match(/"playable_url":"([^"]+)"/) ||
-                        html.match(/"sd_src":"([^"]+)"/);
-                        
-        const hdMatch = html.match(/"browser_native_hd_url":"([^"]+)"/) || 
-                        html.match(/"playable_url_quality_hd":"([^"]+)"/) ||
-                        html.match(/"hd_src":"([^"]+)"/);
-
-        const sdUrl = (sdMatch?.[1] || ogVideo || "").replace(/\\/g, '');
-        const hdUrl = (hdMatch?.[1] || "").replace(/\\/g, '');
-
-        const formats = [];
-        if (hdUrl && hdUrl.startsWith('http')) {
-          formats.push({
-            qualityLabel: 'Alta Qualidade (HD)',
-            url: hdUrl,
-            container: 'mp4',
-            type: 'video' as const
-          });
-        }
-        
-        if (sdUrl && sdUrl.startsWith('http')) {
-          const isDup = formats.some(f => f.url === sdUrl);
-          if (!isDup) {
-            formats.push({
-              qualityLabel: 'Qualidade Padrão (SD)',
-              url: sdUrl,
-              container: 'mp4',
-              type: 'video' as const
-            });
-          }
-        }
-
-        const title = $('meta[property="og:title"]').attr('content') || 
-                      $('title').text() || 
-                      (url.includes("ads/library") ? "Anúncio do Facebook" : "Vídeo do Facebook");
-        
-        const thumbnail = $('meta[property="og:image"]').attr('content') || 
-                          $('meta[name="twitter:image"]').attr('content') || 
-                          "";
-
-        if (formats.length > 0) {
           return res.json({
-            platform: url.includes("ads/library") ? "Facebook Ads" : "Facebook",
-            title: title.split('|')[0].trim(),
-            thumbnail: thumbnail,
-            downloadUrl: formats[0].url,
+            platform: "Facebook",
+            title: info.title || "Vídeo do Facebook",
+            thumbnail: info.thumbnail,
+            downloadUrl: info.url || formats[0]?.url,
             formats: formats,
             filename: `facebook_${Date.now()}`
           });
+        } catch (fbError) {
+          console.warn("yt-dlp failed for Facebook, falling back to scraping", fbError);
+          // Fallback to original scraping logic (keep existing code or simplify)
+          const response = await axios.get(url, {
+            headers: { 'User-Agent': USER_AGENT },
+            timeout: 10000
+          });
+          const $ = cheerio.load(response.data);
+          const ogVideo = $('meta[property="og:video"]').attr('content') || $('meta[property="og:video:secure_url"]').attr('content');
+          if (ogVideo) {
+            return res.json({
+              platform: "Facebook",
+              title: $('meta[property="og:title"]').attr('content') || "Vídeo do Facebook",
+              thumbnail: $('meta[property="og:image"]').attr('content') || "",
+              downloadUrl: ogVideo,
+              formats: [{ qualityLabel: 'Padrão', url: ogVideo, container: 'mp4', type: 'video' }],
+              filename: `facebook_${Date.now()}`
+            });
+          }
+          throw new Error("Não foi possível encontrar o vídeo no Facebook.");
         }
-        throw new Error("Não foi possível encontrar um vídeo público neste link do Facebook. Verifique se o conteúdo é público ou se o anúncio ainda está ativo.");
       }
 
       // Instagram (Reels, Posts)
@@ -514,13 +491,16 @@ async function startServer() {
     if (!filename) return res.status(400).json({ error: "Arquivo no especificado" });
 
     const inputPath = path.join(process.cwd(), 'uploads', filename);
-    const outputPath = path.join(process.cwd(), 'uploads', `clean_${filename}`);
+    const extension = path.extname(filename) || '.mp4';
+    const baseName = path.basename(filename, extension);
+    const outputFilename = `clean_${baseName}${extension}`;
+    const outputPath = path.join(process.cwd(), 'uploads', outputFilename);
 
-    if (!fs.existsSync(inputPath)) return res.status(404).json({ error: "Arquivo no encontrado" });
+    if (!fs.existsSync(inputPath)) return res.status(404).json({ error: "Arquivo não encontrado" });
 
     try {
       if (!isFfmpegAvailable) {
-        throw new Error("FFmpeg não está instalado no servidor. Não é possível processar o vídeo.");
+        throw new Error("FFmpeg não está disponível no servidor.");
       }
 
       // Basic watermark removal using boxblur or delogo
@@ -530,23 +510,43 @@ async function startServer() {
       const w = area?.width || 200;
       const h = area?.height || 100;
 
-      ffmpeg(inputPath)
+      let command = ffmpeg(inputPath)
         .videoFilters([
           {
             filter: 'delogo',
             options: { x, y, w, h }
           }
-        ])
+        ]);
+
+      // Apply compatibility settings for common formats
+      if (extension.toLowerCase() === '.mp4' || extension.toLowerCase() === '.mov') {
+        command = command
+          .videoCodec('libx264')
+          .audioCodec('aac')
+          .outputOptions([
+            '-pix_fmt yuv420p',
+            '-movflags +faststart',
+            '-crf 23',
+            '-preset medium'
+          ]);
+      } else if (extension.toLowerCase() === '.webm') {
+        command = command
+          .videoCodec('libvpx-vp9')
+          .audioCodec('libopus');
+      }
+      // Finalize and save
+      command
         .on('end', () => {
+          console.log(`✅ Vídeo processado com sucesso: ${outputFilename}`);
           res.json({ 
             success: true, 
-            downloadUrl: `/api/download-processed?filename=clean_${filename}`,
-            filename: `clean_${filename}`
+            downloadUrl: `/api/download-processed?filename=${outputFilename}`,
+            filename: outputFilename
           });
         })
         .on('error', (err) => {
-          console.error("FFmpeg error:", err);
-          res.status(500).json({ error: "Erro ao processar vídeo. Verifique se o FFmpeg está instalado." });
+          console.error("❌ FFmpeg error:", err);
+          res.status(500).json({ error: "Erro ao processar vídeo: " + err.message });
         })
         .save(outputPath);
 
