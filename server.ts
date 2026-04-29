@@ -15,14 +15,22 @@ import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { exec, execSync } from "child_process";
 
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36';
+
 // Helper for yt-dlp
 async function getYtDlpInfo(url: string): Promise<any> {
   return new Promise((resolve, reject) => {
-    exec(`yt-dlp -j --no-warnings "${url}"`, (error, stdout) => {
-      if (error) return reject(error);
+    // Increase maxBuffer to 10MB to handle large JSON outputs
+    exec(`yt-dlp -j --no-warnings --user-agent "${USER_AGENT}" "${url}"`, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
+      if (error) {
+        console.error(`[yt-dlp Error]: ${error.message}`);
+        if (stderr) console.error(`[yt-dlp Stderr]: ${stderr}`);
+        return reject(error);
+      }
       try {
         resolve(JSON.parse(stdout));
       } catch (e) {
+        console.error(`[yt-dlp Parse Error]: Failed to parse JSON. Stdout snippet: ${stdout.substring(0, 200)}`);
         reject(e);
       }
     });
@@ -93,8 +101,6 @@ async function startServer() {
 
   app.use(cors());
   app.use(express.json());
-
-  const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36';
 
   // API Routes
   app.get("/api/info", async (req, res) => {
