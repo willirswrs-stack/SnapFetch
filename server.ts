@@ -451,9 +451,20 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
+    console.log(`📦 Servindo arquivos estáticos de: ${distPath}`);
+    
+    if (!fs.existsSync(distPath)) {
+      console.error("❌ ERRO: Pasta 'dist' não encontrada! Certifique-se de que 'npm run build' funcionou.");
+    }
+
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+      const indexPath = path.join(distPath, 'index.html');
+      if (fs.existsSync(indexPath)) {
+        res.sendFile(indexPath);
+      } else {
+        res.status(404).send("Erro: index.html não encontrado na pasta dist.");
+      }
     });
   }
 
@@ -525,7 +536,10 @@ async function startServer() {
   });
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`🚀 SnapFetch Server está ATIVO!`);
+    console.log(`🌍 URL Local: http://localhost:${PORT}`);
+    console.log(`📁 Diretório Atual: ${process.cwd()}`);
+    console.log(`🔧 Ambiente: ${process.env.NODE_ENV}`);
   });
 }
 
