@@ -1,0 +1,532 @@
+import express from "express";
+import dotenv from "dotenv";
+dotenv.config();
+import { createServer as createViteServer } from "vite";
+import path from "path";
+import cors from "cors";
+import ytdl from "@distube/ytdl-core";
+import axios from "axios";
+import contentDisposition from "content-disposition";
+import * as cheerio from "cheerio";
+import archiver from "archiver";
+import fs from "fs";
+import multer from "multer";
+import ffmpeg from "fluent-ffmpeg";
+import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import { exec } from "child_process";
+
+// Set ffmpeg path from installer
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+console.log(`🎥 FFmpeg Path: ${ffmpegInstaller.path}`);
+
+// Check if FFmpeg is installed/working
+let isFfmpegAvailable = false;
+exec(`"${ffmpegInstaller.path}" -version`, (error) => {
+  if (error) {
+    console.warn("⚠️ AVISO: FFmpeg portátil não detectado ou com erro. O recurso de remover marca d'água pode não funcionar.");
+  } else {
+    isFfmpegAvailable = true;
+    console.log("✅ FFmpeg portátil detectado e pronto para uso.");
+  }
+});
+
+// Helper to cleanup uploads directory
+const cleanupUploads = () => {
+  const uploadDir = path.join(process.cwd(), 'uploads');
+  if (!fs.existsSync(uploadDir)) return;
+
+  const files = fs.readdirSync(uploadDir);
+  const now = Date.now();
+  const maxAge = 2 * 60 * 60 * 1000; // 2 hours
+
+  files.forEach(file => {
+    const filePath = path.join(uploadDir, file);
+    const stats = fs.statSync(filePath);
+    if (now - stats.mtimeMs > maxAge) {
+      try {
+        fs.unlinkSync(filePath);
+        console.log(`🗑️ Arquivo temporário removido: ${file}`);
+      } catch (err) {
+        console.error(`Erro ao remover arquivo ${file}:`, err);
+      }
+    }
+  });
+};
+
+// Run cleanup every hour
+setInterval(cleanupUploads, 60 * 60 * 1000);
+
+// Setup storage for uploaded videos
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = path.join(process.cwd(), 'uploads');
+    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    cb(null, `upload_${Date.now()}_${file.originalname}`);
+  }
+});
+
+const upload = multer({ 
+  storage,
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit
+});
+
+async function startServer() {
+  const app = express();
+  const PORT = process.env.PORT || 3000;
+
+  app.use(cors());
+  app.use(express.json());
+
+  const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36';
+
+  // API Routes
+  app.get("/api/info", async (req, res) => {
+    const { url } = req.query;
+    if (!url || typeof url !== "string") {
+      return res.status(400).json({ error: "URL is required" });
+    }
+
+    try {
+      // YouTube & Shorts
+      if (url.includes("youtube.com") || url.includes("youtu.be")) {
+        const isShorts = url.includes("/shorts/");
+        const info = await ytdl.getInfo(url);
+        
+        // Get all formats but prioritize those with both video and audio
+        const videoFormats = info.formats
+          .filter(f => f.hasVideo)
+          .map(f => ({
+            qualityLabel: f.qualityLabel || `${f.height}p`,
+            url: f.url,
+            container: f.container || "mp4",
+            type: "video" as const,
+            hasAudio: f.hasAudio
+          }))
+          .filter((v, i, a) => a.findIndex(t => t.qualityLabel === v.qualityLabel) === i)
+          .sort((a, b) => (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0));
+
+        // Mark high quality formats that may not have audio
+        videoFormats.forEach(f => {
+          if (!f.hasAudio && (parseInt(f.qualityLabel) || 0) >= 1080) {
+            f.qualityLabel += " (Sem Áudio)";
+          }
+        });
+
+        // Filter for audio-only formats
+        const audioFormats = info.formats
+          .filter(f => !f.hasVideo && f.hasAudio)
+          .map(f => ({
+            qualityLabel: `${f.audioBitrate}kbps`,
+            url: f.url,
+            container: (f.container as string) === 'm4a' ? 'm4a' : 'mp3',
+            type: "audio" as const
+          }))
+          .filter((v, i, a) => a.findIndex(t => t.qualityLabel === v.qualityLabel) === i)
+          .sort((a, b) => (parseInt(b.qualityLabel) || 0) - (parseInt(a.qualityLabel) || 0));
+
+        return res.json({
+          platform: isShorts ? "YouTube Shorts" : "YouTube",
+          title: info.videoDetails.title,
+          thumbnail: info.videoDetails.thumbnails[0].url,
+          downloadUrl: videoFormats[0]?.url || audioFormats[0]?.url || "",
+          formats: [...videoFormats, ...audioFormats],
+          filename: `${info.videoDetails.title.replace(/[^\w\s-]/g, '')}`
+        });
+      }
+
+      // TikTok
+      if (url.includes("tiktok.com")) {
+        // Use TikWM API
+        const response = await axios.get(`https://www.tikwm.com/api/?url=${encodeURIComponent(url)}`);
+        const data = response.data;
+        
+        if (data.code === 0 && data.data) {
+          const videoFormats = [{
+            qualityLabel: 'Sem Marca d\'água',
+            url: data.data.play,
+            container: 'mp4',
+            type: 'video' as const
+          }, {
+            qualityLabel: 'Com Marca d\'água',
+            url: data.data.wmplay,
+            container: 'mp4',
+            type: 'video' as const
+          }];
+
+          const audioFormats = [{
+            qualityLabel: 'Áudio Original',
+            url: data.data.music,
+            container: 'mp3',
+            type: 'audio' as const
+          }];
+
+          return res.json({
+            platform: "TikTok",
+            title: data.data.title || `Vídeo de ${data.data.author.unique_id}`,
+            thumbnail: data.data.cover,
+            downloadUrl: data.data.play,
+            formats: [...videoFormats, ...audioFormats],
+            filename: `tiktok_${data.data.id}`
+          });
+        }
+        throw new Error("Não foi possível obter dados do TikTok. Verifique se o vídeo é público.");
+      }
+
+      // Facebook (Videos, Reels, Ads)
+      if (url.includes("facebook.com") || url.includes("fb.watch") || url.includes("fb.com") || url.includes("facebook.com/ads/library")) {
+        // Normalize mobile and ads links
+        let targetUrl = url.replace("m.facebook.com", "www.facebook.com");
+        if (targetUrl.includes("facebook.com/ads/library")) {
+          // Ads library often needs standard www prefix
+          targetUrl = targetUrl.replace("facebook.com/ads/library", "www.facebook.com/ads/library");
+        }
+        
+        const response = await axios.get(targetUrl, {
+          headers: {
+            'User-Agent': USER_AGENT,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Cookie': 'noscript=1'
+          },
+          timeout: 10000 // 10s timeout
+        });
+
+        const html = response.data;
+        const $ = cheerio.load(html);
+        
+        // Try multiple meta tags first
+        const ogVideo = $('meta[property="og:video"]').attr('content') || 
+                        $('meta[property="og:video:secure_url"]').attr('content') ||
+                        $('meta[name="twitter:player:stream"]').attr('content');
+        
+        // Comprehensive regex for Facebook video formats (SD/HD/Ads)
+        const sdMatch = html.match(/"browser_native_sd_url":"([^"]+)"/) || 
+                        html.match(/"playable_url":"([^"]+)"/) ||
+                        html.match(/"sd_src":"([^"]+)"/);
+                        
+        const hdMatch = html.match(/"browser_native_hd_url":"([^"]+)"/) || 
+                        html.match(/"playable_url_quality_hd":"([^"]+)"/) ||
+                        html.match(/"hd_src":"([^"]+)"/);
+
+        const sdUrl = (sdMatch?.[1] || ogVideo || "").replace(/\\/g, '');
+        const hdUrl = (hdMatch?.[1] || "").replace(/\\/g, '');
+
+        const formats = [];
+        if (hdUrl && hdUrl.startsWith('http')) {
+          formats.push({
+            qualityLabel: 'Alta Qualidade (HD)',
+            url: hdUrl,
+            container: 'mp4',
+            type: 'video' as const
+          });
+        }
+        
+        if (sdUrl && sdUrl.startsWith('http')) {
+          const isDup = formats.some(f => f.url === sdUrl);
+          if (!isDup) {
+            formats.push({
+              qualityLabel: 'Qualidade Padrão (SD)',
+              url: sdUrl,
+              container: 'mp4',
+              type: 'video' as const
+            });
+          }
+        }
+
+        const title = $('meta[property="og:title"]').attr('content') || 
+                      $('title').text() || 
+                      (url.includes("ads/library") ? "Anúncio do Facebook" : "Vídeo do Facebook");
+        
+        const thumbnail = $('meta[property="og:image"]').attr('content') || 
+                          $('meta[name="twitter:image"]').attr('content') || 
+                          "";
+
+        if (formats.length > 0) {
+          return res.json({
+            platform: url.includes("ads/library") ? "Facebook Ads" : "Facebook",
+            title: title.split('|')[0].trim(),
+            thumbnail: thumbnail,
+            downloadUrl: formats[0].url,
+            formats: formats,
+            filename: `facebook_${Date.now()}`
+          });
+        }
+        throw new Error("Não foi possível encontrar um vídeo público neste link do Facebook. Verifique se o conteúdo é público ou se o anúncio ainda está ativo.");
+      }
+
+      // Instagram (Reels, Posts)
+      if (url.includes("instagram.com")) {
+        const response = await axios.get(url, {
+          headers: {
+            'User-Agent': USER_AGENT,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+          timeout: 10000
+        });
+
+        const html = response.data;
+        const $ = cheerio.load(html);
+        
+        let videoUrl = $('meta[property="og:video"]').attr('content') || 
+                       $('meta[property="og:video:secure_url"]').attr('content') ||
+                       $('meta[name="twitter:player:stream"]').attr('content');
+        
+        const title = $('meta[property="og:title"]').attr('content') || 
+                      $('meta[name="twitter:title"]').attr('content') || 
+                      "Post do Instagram";
+        
+        const thumbnail = $('meta[property="og:image"]').attr('content') || 
+                          $('meta[name="twitter:image"]').attr('content') || 
+                          "";
+
+        // Deep script parsing if meta tags fail
+        if (!videoUrl) {
+          const scripts = $('script');
+          scripts.each((i, el) => {
+            const content = $(el).text();
+            if (content.includes('video_url') || content.includes('display_url')) {
+              // Try multiple regex patterns for Instagram's changing JSON structure
+              const patterns = [
+                /"video_url":"([^"]+)"/,
+                /"display_url":"([^"]+)"/,
+                /video_url":"([^"]+)"/,
+                /"xdt_api__v1__media__direct_path":"([^"]+)"/
+              ];
+              
+              for (const pattern of patterns) {
+                const match = content.match(pattern);
+                if (match && match[1]) {
+                  const cleaned = match[1].replace(/\\u0026/g, '&').replace(/\\/g, '');
+                  if (cleaned.startsWith('http')) {
+                    videoUrl = cleaned;
+                    break;
+                  }
+                }
+              }
+            }
+          });
+        }
+        
+        if (videoUrl) {
+          return res.json({
+            platform: "Instagram",
+            title: title.split('|')[0].trim(),
+            thumbnail: thumbnail,
+            downloadUrl: videoUrl,
+            formats: [{
+              qualityLabel: 'Qualidade Original',
+              url: videoUrl,
+              container: 'mp4',
+              type: 'video'
+            }],
+            filename: `instagram_${Date.now()}`
+          });
+        }
+
+        throw new Error("Não foi possível encontrar o vídeo no Instagram. Lembre-se que links de perfis privados não são suportados. Tente copiar o link novamente.");
+      }
+      
+      // Fallback extraction logic using a generic approach if everything else fails
+      if (url.includes("threads.net")) {
+         // Threads support could be added here
+      }
+
+      return res.status(400).json({ error: "Plataforma não suportada no momento ou URL inválida. Suportamos YouTube, TikTok, Facebook e Instagram." });
+    } catch (error: any) {
+      console.error(error);
+      const message = error.response?.status === 404 ? "Vídeo não encontrado." : error.message;
+      return res.status(500).json({ error: "Erro: " + message });
+    }
+  });
+
+  // Proxy route to bypass CORS and force download with Range support for Resume
+  app.get("/api/proxy-download", async (req, res) => {
+    const { url, filename } = req.query;
+    if (!url || typeof url !== "string") {
+      return res.status(400).send("URL é obrigatória");
+    }
+
+    // Security: Validate URL domain to prevent SSRF
+    try {
+      const parsedUrl = new URL(url);
+      const allowedDomains = [
+        'googlevideo.com', // YouTube
+        'tiktok.com', 
+        'tiktokv.com', 
+        'fbcdn.net', // Facebook/Instagram
+        'instagram.com',
+        'twimg.com', 
+        'tikwm.com',
+        'snapchat.com'
+      ];
+      
+      const isAllowed = allowedDomains.some(domain => parsedUrl.hostname.endsWith(domain));
+      if (!isAllowed) {
+        console.warn(`Tentativa de acesso a domínio não autorizado: ${parsedUrl.hostname}`);
+        return res.status(403).send("Domínio não autorizado para proxy.");
+      }
+    } catch (e) {
+      return res.status(400).send("URL inválida");
+    }
+
+    const range = req.headers.range;
+
+    try {
+      const config: any = {
+        method: 'get',
+        url: url,
+        responseType: 'stream',
+        headers: {
+          'User-Agent': USER_AGENT
+        }
+      };
+
+      if (range) {
+        config.headers.Range = range;
+        // Some servers require the range to be exactly what was requested
+      }
+
+      const response = await axios({
+        ...config,
+        timeout: 0, // No timeout for download streams
+      });
+
+      const status = response.status;
+      res.status(status);
+
+      // Pass through important headers
+      if (response.headers['content-range']) res.setHeader('Content-Range', response.headers['content-range'].toString());
+      if (response.headers['content-length']) res.setHeader('Content-Length', response.headers['content-length'].toString());
+      if (response.headers['accept-ranges']) res.setHeader('Accept-Ranges', response.headers['accept-ranges'].toString());
+      
+      res.setHeader('Content-Disposition', contentDisposition(filename as string || 'video.mp4'));
+      res.setHeader('Content-Type', (response.headers['content-type'] as string) || 'video/mp4');
+      
+      response.data.pipe(res);
+    } catch (error: any) {
+      console.error("Proxy error:", error);
+      if (error.response) {
+        res.status(error.response.status).send(error.response.statusText);
+      } else {
+        res.status(500).send("Error downloading file");
+      }
+    }
+  });
+
+  // Route to download source code
+  app.get("/api/download-source", (req, res) => {
+    const archive = archiver('zip', {
+      zlib: { level: 9 }
+    });
+
+    res.attachment('snapfetch_source.zip');
+
+    archive.on('error', (err) => {
+      res.status(500).send({ error: err.message });
+    });
+
+    archive.pipe(res);
+
+    // Add source files
+    archive.file('server.ts', { name: 'server.ts' });
+    archive.file('package.json', { name: 'package.json' });
+    archive.file('index.html', { name: 'index.html' });
+    archive.file('PROJECT_INFO.md', { name: 'PROJECT_INFO.md' });
+    archive.directory('src/', 'src');
+    archive.directory('public/', 'public');
+
+    archive.finalize();
+  });
+
+  // Vite middleware for development
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  // New Route: Upload video from device
+  app.post("/api/upload", upload.single('video'), (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: "Nenhum arquivo enviado" });
+    }
+    res.json({ 
+      filename: req.file.filename,
+      path: req.file.path,
+      originalName: req.file.originalname
+    });
+  });
+
+  // New Route: Remove Watermark using FFmpeg
+  app.post("/api/remove-watermark", async (req, res) => {
+    const { filename, area } = req.body; // area: { x, y, width, height }
+    if (!filename) return res.status(400).json({ error: "Arquivo no especificado" });
+
+    const inputPath = path.join(process.cwd(), 'uploads', filename);
+    const outputPath = path.join(process.cwd(), 'uploads', `clean_${filename}`);
+
+    if (!fs.existsSync(inputPath)) return res.status(404).json({ error: "Arquivo no encontrado" });
+
+    try {
+      if (!isFfmpegAvailable) {
+        throw new Error("FFmpeg não está instalado no servidor. Não é possível processar o vídeo.");
+      }
+
+      // Basic watermark removal using boxblur or delogo
+      // Default area if not provided (TikTok/IG usually top-left or bottom-right)
+      const x = area?.x || 10;
+      const y = area?.y || 10;
+      const w = area?.width || 200;
+      const h = area?.height || 100;
+
+      ffmpeg(inputPath)
+        .videoFilters([
+          {
+            filter: 'delogo',
+            options: { x, y, w, h }
+          }
+        ])
+        .on('end', () => {
+          res.json({ 
+            success: true, 
+            downloadUrl: `/api/download-processed?filename=clean_${filename}`,
+            filename: `clean_${filename}`
+          });
+        })
+        .on('error', (err) => {
+          console.error("FFmpeg error:", err);
+          res.status(500).json({ error: "Erro ao processar vídeo. Verifique se o FFmpeg está instalado." });
+        })
+        .save(outputPath);
+
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/download-processed", (req, res) => {
+    const { filename } = req.query;
+    if (!filename) return res.status(400).send("Filename required");
+    const filePath = path.join(process.cwd(), 'uploads', filename as string);
+    if (!fs.existsSync(filePath)) return res.status(404).send("File not found");
+    res.download(filePath);
+  });
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+startServer();

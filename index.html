@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>SnapFetch - Baixador de Vídeos</title>
+    <meta name="description" content="Baixe vídeos do YouTube, Instagram, TikTok e Facebook. Remova marcas d'água facilmente." />
+
+    <!-- PWA -->
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#7C3AED" />
+    <meta name="mobile-web-app-capable" content="yes" />
+
+    <!-- iOS (Safari) PWA Support -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="SnapFetch" />
+    <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/3048/3048122.png" />
+    <link rel="apple-touch-startup-image" href="https://cdn-icons-png.flaticon.com/512/3048/3048122.png" />
+
+    <!-- Microsoft -->
+    <meta name="msapplication-TileColor" content="#7C3AED" />
+    <meta name="msapplication-TileImage" content="https://cdn-icons-png.flaticon.com/512/3048/3048122.png" />
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="SnapFetch - Baixador de Vídeos" />
+    <meta property="og:description" content="Baixe vídeos de qualquer rede social, sem marca d'água." />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://cdn-icons-png.flaticon.com/512/3048/3048122.png" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
