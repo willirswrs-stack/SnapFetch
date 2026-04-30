@@ -506,12 +506,12 @@ async function startServer() {
   // New Route: Remove Watermark using FFmpeg
   app.post("/api/remove-watermark", async (req, res) => {
     const { filename, area } = req.body; // area: { x, y, width, height }
-    if (!filename) return res.status(400).json({ error: "Arquivo no especificado" });
+    if (!filename) return res.status(400).json({ error: "Arquivo não especificado" });
 
     const inputPath = path.join(process.cwd(), 'uploads', filename);
-    const extension = path.extname(filename) || '.mp4';
-    const baseName = path.basename(filename, extension);
-    const outputFilename = `clean_${baseName}${extension}`;
+    // Always output as .mp4 for maximum compatibility (fixes 0xc10100be on Windows)
+    const baseName = path.basename(filename, path.extname(filename));
+    const outputFilename = `clean_${baseName}_${Date.now()}.mp4`;
     const outputPath = path.join(process.cwd(), 'uploads', outputFilename);
 
     if (!fs.existsSync(inputPath)) return res.status(404).json({ error: "Arquivo não encontrado" });
@@ -521,60 +521,78 @@ async function startServer() {
         throw new Error("FFmpeg não está disponível no servidor.");
       }
 
-      // Basic watermark removal using boxblur or delogo
-      // Default area if not provided (TikTok/IG usually top-left or bottom-right)
-      // Ensure area coordinates are integers
-      const x = Math.floor(area?.x || 10);
-      const y = Math.floor(area?.y || 10);
-      const w = Math.floor(area?.width || 200);
-      const h = Math.floor(area?.height || 100);
+      // Step 1: Use ffprobe to get real video dimensions before applying filters
+      const probeData: any = await new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(inputPath, (err, data) => {
+          if (err) {
+            console.error("❌ ffprobe error:", err.message);
+            return reject(err);
+          }
+          resolve(data);
+        });
+      });
 
-      let command = ffmpeg(inputPath)
-        .videoFilters([
-          {
-            filter: 'delogo',
-            options: { x, y, w, h }
-          },
-          // Ensure dimensions are divisible by 2 and use square pixels for H.264 compatibility
-          'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-          'setsar=1'
-        ]);
+      const videoStream = probeData.streams?.find((s: any) => s.codec_type === 'video');
+      const videoWidth = videoStream?.width || 1920;
+      const videoHeight = videoStream?.height || 1080;
+      console.log(`🎥 Vídeo detectado: ${videoWidth}x${videoHeight}, codec=${videoStream?.codec_name}`);
 
-      // Apply compatibility settings for common formats
-      if (extension.toLowerCase() === '.mp4' || extension.toLowerCase() === '.mov') {
-        command = command
-          .videoCodec('libx264')
-          .audioCodec('aac')
-          .outputOptions([
-            '-pix_fmt yuv420p',
-            '-movflags +faststart',
-            '-crf 23',
-            '-preset medium',
-            '-profile:v main',
-            '-level 3.1'
-          ]);
-      } else if (extension.toLowerCase() === '.webm') {
-        command = command
-          .videoCodec('libvpx-vp9')
-          .audioCodec('libopus');
-      }
-      // Finalize and save
-      command
+      // Step 2: Clamp delogo area strictly to video bounds (prevents FFmpeg failure)
+      const rawX = Math.floor(area?.x ?? 10);
+      const rawY = Math.floor(area?.y ?? 10);
+      const rawW = Math.floor(area?.width ?? 200);
+      const rawH = Math.floor(area?.height ?? 100);
+
+      const x = Math.max(0, Math.min(rawX, videoWidth - 2));
+      const y = Math.max(0, Math.min(rawY, videoHeight - 2));
+      const w = Math.max(2, Math.min(rawW, videoWidth - x));
+      const h = Math.max(2, Math.min(rawH, videoHeight - y));
+      console.log(`🔲 Delogo área (clamped): x=${x}, y=${y}, w=${w}, h=${h}`);
+
+      // Step 3: Build filter chain as pure strings (avoids object serialization issues)
+      const vfFilter = [
+        `delogo=x=${x}:y=${y}:w=${w}:h=${h}`,
+        'scale=trunc(iw/2)*2:trunc(ih/2)*2', // force even dimensions for H.264
+        'setsar=1'                             // square pixels for Windows players
+      ].join(',');
+
+      // Step 4: Re-encode to H.264/AAC MP4 — universally compatible (fixes 0xc10100be)
+      ffmpeg(inputPath)
+        .outputOptions([
+          `-vf ${vfFilter}`,
+          '-c:v libx264',
+          '-c:a aac',
+          '-pix_fmt yuv420p',    // required for H.264 compatibility
+          '-movflags +faststart', // web-optimized MP4
+          '-crf 22',             // quality (lower = better, 22 is near-lossless)
+          '-preset fast',        // faster than medium with minimal quality loss
+          '-profile:v main',     // widest device support
+          '-level:v 4.0',        // supports up to 1080p60
+        ])
+        .on('start', (cmd) => console.log(`🎬 FFmpeg cmd: ${cmd}`))
+        .on('progress', (p) => {
+          if (p.percent) console.log(`⏳ Progresso: ${p.percent.toFixed(1)}%`);
+        })
         .on('end', () => {
-          console.log(`✅ Vídeo processado com sucesso: ${outputFilename}`);
+          const stats = fs.statSync(outputPath);
+          console.log(`✅ Vídeo processado com sucesso: ${outputFilename} (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
           res.json({ 
             success: true, 
             downloadUrl: `/api/download-processed?filename=${outputFilename}`,
             filename: outputFilename
           });
         })
-        .on('error', (err) => {
-          console.error("❌ FFmpeg error:", err);
+        .on('error', (err, _stdout, stderr) => {
+          console.error("❌ FFmpeg error:", err.message);
+          if (stderr) console.error("❌ FFmpeg stderr:", stderr.substring(0, 500));
+          // Clean up partial output file if it exists
+          if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
           res.status(500).json({ error: "Erro ao processar vídeo: " + err.message });
         })
         .save(outputPath);
 
     } catch (error: any) {
+      console.error("❌ remove-watermark catch:", error.message);
       res.status(500).json({ error: error.message });
     }
   });
