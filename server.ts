@@ -13,6 +13,7 @@ import fs from "fs";
 import multer from "multer";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import ffprobeInstaller from "@ffprobe-installer/ffprobe";
 import { exec, execSync } from "child_process";
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36';
@@ -60,7 +61,9 @@ try {
 } catch (e) {}
 
 ffmpeg.setFfmpegPath(ffmpegPath);
+ffmpeg.setFfprobePath(ffprobeInstaller.path);
 console.log(`🎥 FFmpeg Path: ${ffmpegPath}`);
+console.log(`🔍 FFprobe Path: ${ffprobeInstaller.path}`);
 
 // Check if FFmpeg is installed/working
 let isFfmpegAvailable = false;
@@ -520,10 +523,11 @@ async function startServer() {
 
       // Basic watermark removal using boxblur or delogo
       // Default area if not provided (TikTok/IG usually top-left or bottom-right)
-      const x = area?.x || 10;
-      const y = area?.y || 10;
-      const w = area?.width || 200;
-      const h = area?.height || 100;
+      // Ensure area coordinates are integers
+      const x = Math.floor(area?.x || 10);
+      const y = Math.floor(area?.y || 10);
+      const w = Math.floor(area?.width || 200);
+      const h = Math.floor(area?.height || 100);
 
       let command = ffmpeg(inputPath)
         .videoFilters([
@@ -531,11 +535,9 @@ async function startServer() {
             filter: 'delogo',
             options: { x, y, w, h }
           },
-          // Ensure dimensions are divisible by 2 for H.264 compatibility
-          {
-            filter: 'scale',
-            options: 'trunc(iw/2)*2:trunc(ih/2)*2'
-          }
+          // Ensure dimensions are divisible by 2 and use square pixels for H.264 compatibility
+          'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+          'setsar=1'
         ]);
 
       // Apply compatibility settings for common formats
@@ -547,7 +549,9 @@ async function startServer() {
             '-pix_fmt yuv420p',
             '-movflags +faststart',
             '-crf 23',
-            '-preset medium'
+            '-preset medium',
+            '-profile:v main',
+            '-level 3.1'
           ]);
       } else if (extension.toLowerCase() === '.webm') {
         command = command
